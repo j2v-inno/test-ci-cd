@@ -1,0 +1,68 @@
+# Stage 9 in the diagram: Deploy to Dev Environment.
+# Pulls the freshly built image and runs the dev stack via docker compose.
+# Followed by a quick smoke check.
+name: Deploy to Dev
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to deploy (default: latest)"
+        required: false
+        default: "latest"
+  workflow_run:
+    workflows: ["Main Build & Package"]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  deploy:
+    name: Deploy dev stack
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    env:
+      REGISTRY: localhost:5000
+      IMAGE_NAME: cicd-demo
+      IMAGE_TAG: ${{ github.event.inputs.image_tag || 'latest' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pull image
+        run: docker pull "${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+
+      - name: Bring down old dev stack (if any)
+        run: docker compose -f docker-compose.dev.yml down || true
+
+      - name: Bring up dev stack
+        env:
+          IMAGE_TAG: ${{ env.IMAGE_TAG }}
+        run: docker compose -f docker-compose.dev.yml up -d
+
+      - name: Wait for healthy
+        run: |
+          for i in $(seq 1 30); do
+            status=$(docker inspect --format='{{.State.Health.Status}}' cicd-demo-dev 2>/dev/null || echo "starting")
+            echo "Attempt $i: $status"
+            if [ "$status" = "healthy" ]; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs cicd-demo-dev
+          exit 1
+
+  smoke:
+    name: Post-deploy smoke (dev)
+    needs: [deploy]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-dev.txt
+      - name: Run smoke tests against dev
+        env:
+          # host.docker.internal lets the act container reach the dev stack on the host
+          TARGET_URL: http://host.docker.internal:8001
+        run: pytest tests/smoke -m smoke

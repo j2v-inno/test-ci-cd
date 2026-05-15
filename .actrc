@@ -1,0 +1,6 @@
+# Use a fuller Ubuntu image so common GitHub Actions tooling (docker, python setup, etc.) works.
+-P ubuntu-latest=catthehacker/ubuntu:act-latest
+# Bind the host Docker socket so workflows can build/push/run containers on the host daemon.
+--container-options=-v /var/run/docker.sock:/var/run/docker.sock
+# Workflows reach the host's published ports via host.docker.internal.
+--container-options=--add-host=host.docker.internal:host-gateway

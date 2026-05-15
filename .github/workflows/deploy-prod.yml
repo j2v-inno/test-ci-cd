@@ -1,0 +1,87 @@
+# Stage 13 + 14 + 15 in the diagram: Release Approval, Deploy to Production, Post-Deploy Monitoring.
+# Manual trigger only. On real GitHub, the `production` environment should require reviewer approval.
+name: Deploy to Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to release (must already be in registry)"
+        required: true
+      release_notes:
+        description: "Short release note shown in the workflow log"
+        required: false
+        default: ""
+
+jobs:
+  release-approval:
+    name: Release approval gate
+    runs-on: ubuntu-latest
+    environment: production   # GitHub protected env enforces approval; act ignores this
+    steps:
+      - name: Record release intent
+        run: |
+          echo "[RELEASE] tag=${{ github.event.inputs.image_tag }}"
+          echo "[RELEASE] notes=${{ github.event.inputs.release_notes }}"
+
+  deploy:
+    name: Deploy production stack
+    needs: [release-approval]
+    runs-on: ubuntu-latest
+    env:
+      REGISTRY: localhost:5000
+      IMAGE_NAME: cicd-demo
+      IMAGE_TAG: ${{ github.event.inputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pull image
+        run: docker pull "${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+
+      - name: Down old prod stack
+        run: docker compose -f docker-compose.prod.yml down || true
+
+      - name: Up prod stack
+        run: docker compose -f docker-compose.prod.yml up -d
+
+      - name: Wait for healthy
+        run: |
+          for i in $(seq 1 30); do
+            status=$(docker inspect --format='{{.State.Health.Status}}' cicd-demo-prod 2>/dev/null || echo "starting")
+            echo "Attempt $i: $status"
+            if [ "$status" = "healthy" ]; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs cicd-demo-prod
+          exit 1
+
+  post-deploy:
+    name: Post-deploy monitoring & smoke
+    needs: [deploy]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-dev.txt
+
+      - name: Smoke tests
+        env:
+          TARGET_URL: http://host.docker.internal:8003
+        run: pytest tests/smoke -m smoke -v
+
+      - name: 60-second health watch (post-deploy monitoring)
+        run: |
+          for i in $(seq 1 6); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://host.docker.internal:8003/health || echo "000")
+            echo "watch $i/6 -> HTTP $code"
+            if [ "$code" != "200" ]; then
+              echo "Prod health degraded; aborting watch."
+              exit 1
+            fi
+            sleep 10
+          done
+          echo "Prod looks healthy after deploy."

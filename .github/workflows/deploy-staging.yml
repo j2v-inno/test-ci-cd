@@ -1,0 +1,60 @@
+# Stage 12 in the diagram: Deploy to UAT / Staging.
+# Manual trigger represents the QA-pass / pre-release sign-off.
+# On real GitHub, gate this with a protected `staging` environment for approval.
+name: Deploy to Staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to promote to staging"
+        required: true
+        default: "latest"
+
+jobs:
+  deploy:
+    name: Deploy staging stack
+    runs-on: ubuntu-latest
+    environment: staging   # GitHub UI shows an approval prompt; act ignores this
+    env:
+      REGISTRY: localhost:5000
+      IMAGE_NAME: cicd-demo
+      IMAGE_TAG: ${{ github.event.inputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pull image
+        run: docker pull "${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+
+      - name: Down old staging stack
+        run: docker compose -f docker-compose.staging.yml down || true
+
+      - name: Up staging stack
+        run: docker compose -f docker-compose.staging.yml up -d
+
+      - name: Wait for healthy
+        run: |
+          for i in $(seq 1 30); do
+            status=$(docker inspect --format='{{.State.Health.Status}}' cicd-demo-staging 2>/dev/null || echo "starting")
+            echo "Attempt $i: $status"
+            if [ "$status" = "healthy" ]; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs cicd-demo-staging
+          exit 1
+
+  business-validation:
+    name: Business validation smoke
+    needs: [deploy]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-dev.txt
+      - env:
+          TARGET_URL: http://host.docker.internal:8002
+        run: pytest tests/smoke -m smoke -v

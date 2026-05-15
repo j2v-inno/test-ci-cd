@@ -1,0 +1,58 @@
+# Stage 7 + 8 in the diagram: build the Docker image and push it to the artifact store.
+# Locally the artifact store is a Docker registry container on localhost:5000.
+# Triggers stage 9 (deploy to dev) via workflow_run when running on real GitHub;
+# under `act`, run deploy-dev.yml separately.
+name: Main Build & Package
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  build-and-push:
+    name: Build image & push to registry
+    runs-on: ubuntu-latest
+    env:
+      REGISTRY: localhost:5000
+      IMAGE_NAME: cicd-demo
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image tag
+        id: tag
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          echo "image_tag=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Built tag: ${SHORT_SHA}"
+
+      - name: Build image
+        run: |
+          docker build \
+            --build-arg GIT_COMMIT="${GITHUB_SHA}" \
+            -t "${REGISTRY}/${IMAGE_NAME}:${{ steps.tag.outputs.image_tag }}" \
+            -t "${REGISTRY}/${IMAGE_NAME}:latest" \
+            .
+
+      - name: Push image
+        run: |
+          docker push "${REGISTRY}/${IMAGE_NAME}:${{ steps.tag.outputs.image_tag }}"
+          docker push "${REGISTRY}/${IMAGE_NAME}:latest"
+
+      - name: Record build manifest
+        run: |
+          mkdir -p build-output
+          cat > build-output/manifest.json <<EOF
+          {
+            "image": "${REGISTRY}/${IMAGE_NAME}",
+            "tag": "${{ steps.tag.outputs.image_tag }}",
+            "commit": "${GITHUB_SHA}"
+          }
+          EOF
+          cat build-output/manifest.json
+
+      - name: Upload manifest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-manifest
+          path: build-output/manifest.json

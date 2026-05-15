@@ -1,0 +1,22 @@
+services:
+  app:
+    image: ${REGISTRY:-localhost:5000}/cicd-demo:${IMAGE_TAG:-latest}
+    container_name: cicd-demo-prod
+    restart: unless-stopped
+    ports:
+      - "8003:8000"
+    environment:
+      APP_ENV: prod
+      GIT_COMMIT: ${GIT_COMMIT:-unknown}
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health',timeout=2).status==200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s

@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C \"z:/Dev/Inno/CI-CD Flow test\" rev-parse --is-inside-work-tree)",
+      "Bash(./.venv/Scripts/python.exe -m ruff check .)",
+      "Bash(./.venv/Scripts/python.exe -m ruff format --check .)",
+      "Bash(./.venv/Scripts/python.exe -m bandit -r app -ll)",
+      "Bash(./.venv/Scripts/python.exe -m pytest tests/unit -q)"
+    ]
+  }
+}
