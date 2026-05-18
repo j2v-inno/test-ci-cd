@@ -5,6 +5,8 @@ A minimal, runnable implementation of the end-to-end CI/CD flow:
 
 Everything runs **locally** on Docker — no cloud account required. The same workflows work unchanged when pushed to GitHub.
 
+> See [CHECKLISTS.md](CHECKLISTS.md) for a developer workflow checklist (pre-dev → post-merge) and a step-by-step local-testing checklist.
+
 ---
 
 ## Pieces
@@ -29,64 +31,143 @@ Everything runs **locally** on Docker — no cloud account required. The same wo
 
 ## Prereqs
 
-1. Docker Desktop running (Linux containers).
-2. `act` installed — Windows: `winget install nektos.act` or `choco install act-cli`.
-3. Python 3.12+ (only needed for the local `dev-loop` script — CI itself runs in containers).
+1. **Docker Desktop** running (Linux containers mode).
+2. **Python 3.10+** on `PATH` (`python --version`).
+3. **`act`** (only for running the CI workflows locally). Install on Windows:
+   ```powershell
+   winget install --id nektos.act
+   ```
+   > After install, **open a fresh PowerShell window** — winget adds `act` to PATH but existing shells won't see it until you reopen them. Verify with `act --version`.
 
-## One-time setup: start the artifact store
+---
+
+## Path A — Run just the app (fastest, no CI)
+
+Use this when you just want to play with the Flask service.
+
+1. **Create venv + install + run unit tests + lint** (one command does it all):
+   ```powershell
+   .\scripts\dev-loop.ps1
+   ```
+   Expect: `11 passed`, `All checks passed!`
+2. **Start the app**:
+   ```powershell
+   .\.venv\Scripts\python.exe -m app.main
+   ```
+3. **Hit it** in another shell:
+   ```powershell
+   curl.exe http://localhost:8000/health
+   curl.exe http://localhost:8000/version
+   curl.exe -X POST http://localhost:8000/items -H "Content-Type: application/json" -d '{\"name\":\"widget\",\"price\":9.99}'
+   curl.exe http://localhost:8000/items
+   ```
+4. **Stop**: `Ctrl+C` in the app shell.
+
+---
+
+## Path B — Run the full CI/CD pipeline locally
+
+This drives every workflow under [.github/workflows/](.github/workflows/) via `act`, in the same order as the diagram.
+
+### Step 1 — Start the local artifact store (stage 8)
 
 ```powershell
 .\scripts\registry-up.ps1
 ```
 
-This starts a Docker registry on `localhost:5000`. Verify with `curl http://localhost:5000/v2/_catalog`.
+Verify the registry is up:
+```powershell
+curl.exe http://localhost:5000/v2/_catalog
+# expect: {"repositories":[]}
+```
 
-## Run the full pipeline
+### Step 2 — Run PR Validation (stage 5)
+
+Build + lint + bandit + unit tests + `pip-audit`:
+```powershell
+.\scripts\run-pipeline.ps1 -Stage pr
+```
+All 5 jobs should print `🏁 Job succeeded`.
+
+> 💡 If `pip-audit` flags a CVE, that's the gate doing its job — bump the offending package in [requirements.txt](requirements.txt) and re-run. Don't drop `--strict` to silence it.
+
+### Step 3 — Build & push the image (stages 7 + 8)
 
 ```powershell
-# PR validation → build → push to registry → deploy dev → QA tests
-.\scripts\run-pipeline.ps1
+.\scripts\run-pipeline.ps1 -Stage build
+```
+Verify the image landed in the registry:
+```powershell
+curl.exe http://localhost:5000/v2/cicd-demo/tags/list
+# expect: {"name":"cicd-demo","tags":["<short-sha>","latest"]}
+```
 
-# Then promote (manual gates, just like real life):
+### Step 4 — Deploy to Dev (stage 9)
+
+```powershell
+.\scripts\run-pipeline.ps1 -Stage dev
+```
+Wait for `Attempt N: healthy`, then verify:
+```powershell
+curl.exe http://localhost:8001/health
+# expect: {"message":"hello world","status":"ok"}
+curl.exe http://localhost:8001/version
+# expect: environment=dev
+```
+
+### Step 5 — Run QA Tests + Gate (stages 10 + 11)
+
+```powershell
+.\scripts\run-pipeline.ps1 -Stage qa
+```
+Expect: 4 integration + 2 smoke tests pass, then `[QA GATE] Integration + smoke suites passed.`
+
+### Step 6 — Promote to Staging (stage 12)
+
+After QA passes (the human approval), promote the same image:
+```powershell
 .\scripts\run-pipeline.ps1 -Stage staging -ImageTag latest
-.\scripts\run-pipeline.ps1 -Stage prod    -ImageTag latest
+curl.exe http://localhost:8002/health    # staging
 ```
 
-Run a single stage at a time:
+### Step 7 — Release to Production (stages 13 + 14 + 15)
 
 ```powershell
-.\scripts\run-pipeline.ps1 -Stage pr      # just lint + tests + security scan
-.\scripts\run-pipeline.ps1 -Stage build   # build + push image
-.\scripts\run-pipeline.ps1 -Stage dev     # deploy to dev
-.\scripts\run-pipeline.ps1 -Stage qa      # integration + smoke against dev
+.\scripts\run-pipeline.ps1 -Stage prod -ImageTag latest
+curl.exe http://localhost:8003/health    # prod
 ```
+The prod workflow includes a 60-second health watch as post-deploy monitoring.
 
-After deploy, hit the running environments directly:
-
-```
-http://localhost:8001/health    # dev
-http://localhost:8002/health    # staging
-http://localhost:8003/health    # prod
-```
-
-## Try it without act (pure Python)
+### Or: do steps 2–5 in one shot
 
 ```powershell
-.\scripts\dev-loop.ps1    # creates .venv, installs deps, runs ruff + unit tests
+.\scripts\run-pipeline.ps1   # runs pr → build → dev → qa
 ```
 
-Run the app directly:
+Then run staging / prod separately when you're ready to "approve" each gate.
 
-```powershell
-python -m app.main
-# then visit http://localhost:8000/items
-```
+---
 
 ## Tear it all down
 
 ```powershell
 .\scripts\teardown.ps1
 ```
+Stops every container the demo brought up (registry + dev + staging + prod).
+
+---
+
+## Troubleshooting (real things that bit during the first run)
+
+| Symptom | Fix |
+|---|---|
+| `act` not found in your PowerShell session right after `winget install` | Open a **new** PowerShell window — winget's PATH update isn't visible to existing shells |
+| `act` errors with "Cannot connect to the Docker daemon" | Start Docker Desktop |
+| `docker push localhost:5000/...` connection refused | Registry container is down — `.\scripts\registry-up.ps1` |
+| Port 8001 / 8002 / 8003 / 5000 already in use | Stop the other service, or change the `ports:` mapping in the relevant compose file |
+| `pip-audit --strict` fails in PR validation | A CVE landed in a pinned dep — bump the version in `requirements.txt`. Do **not** drop `--strict` |
+| Integration test `test_create_then_get_then_delete` returns 404 after POST | Gunicorn workers > 1 split in-memory state across processes. The [Dockerfile](Dockerfile) is pinned to `--workers 1` for this demo; a real service would use Redis/a DB |
+| `upload-artifact@v4` fails with `ACTIONS_RUNTIME_TOKEN` missing | Make sure `--artifact-server-path=.act-artifacts` is in [.actrc](.actrc) |
 
 ## Going to real GitHub
 

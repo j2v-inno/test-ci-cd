@@ -13,7 +13,9 @@ def client():
 def test_health(client):
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.get_json() == {"status": "ok"}
+    payload = response.get_json()
+    assert payload["status"] == "ok"
+    assert payload["message"] == "hello world"
 
 
 def test_version_shape(client):
