@@ -5,7 +5,9 @@
       "Bash(./.venv/Scripts/python.exe -m ruff check .)",
       "Bash(./.venv/Scripts/python.exe -m ruff format --check .)",
       "Bash(./.venv/Scripts/python.exe -m bandit -r app -ll)",
-      "Bash(./.venv/Scripts/python.exe -m pytest tests/unit -q)"
+      "Bash(./.venv/Scripts/python.exe -m pytest tests/unit -q)",
+      "Bash(./.venv/Scripts/python.exe -m pip_audit -r requirements.txt --strict)",
+      "Bash(git push *)"
     ]
   }
 }
