@@ -15,7 +15,7 @@ def create_app(store: ItemStore | None = None) -> Flask:
 
     @app.get("/health")
     def health():
-        return jsonify(status="ok", message="hello world", sample="sample update"), 200
+        return jsonify(status="ok", message="hello world", sample="sample update 2"), 200
 
     @app.get("/version")
     def version():
