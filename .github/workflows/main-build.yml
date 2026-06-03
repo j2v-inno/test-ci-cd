@@ -7,37 +7,189 @@ name: Main Build & Package
 on:
   push:
     branches: [main]
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      registry_url:
+        description: "Target registry (local, GHCR, ECR, or any OCI-compliant registry)"
+        required: false
+        default: "localhost:5000"
+      image_name:
+        description: "Image name within the registry"
+        required: false
+        default: "cicd-demo"
+      image_tag:
+        description: "Override tag. Empty = compute from GITHUB_SHA::7"
+        required: false
+        default: ""
+      mode:
+        description: "build-only skips registry login, push, and downstream deploy trigger"
+        required: false
+        type: choice
+        options:
+          - build-and-push
+          - build-only
+        default: "build-and-push"
 
 jobs:
   build-and-push:
     name: Build image & push to registry
     runs-on: ubuntu-latest
     env:
-      REGISTRY: localhost:5000
-      IMAGE_NAME: cicd-demo
+      REGISTRY: ${{ github.event.inputs.registry_url || 'localhost:5000' }}
+      IMAGE_NAME: ${{ github.event.inputs.image_name || 'cicd-demo' }}
+      MODE: ${{ github.event.inputs.mode || 'build-and-push' }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Compute image tag
         id: tag
         run: |
-          SHORT_SHA="${GITHUB_SHA::7}"
-          echo "image_tag=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-          echo "Built tag: ${SHORT_SHA}"
+          INPUT_TAG="${{ github.event.inputs.image_tag }}"
+          if [ -n "$INPUT_TAG" ]; then
+            IMAGE_TAG="$INPUT_TAG"
+          else
+            IMAGE_TAG="${GITHUB_SHA::7}"
+          fi
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Built tag: ${IMAGE_TAG}"
+
+      - name: Check registry reachability
+        id: registry_check
+        if: env.MODE == 'build-and-push'
+        run: |
+          echo "Checking registry at ${REGISTRY}..."
+          if ! curl -sf "http://${REGISTRY}/v2/" > /dev/null 2>&1; then
+            echo "Registry at ${REGISTRY} is not reachable" >&2
+            exit 1
+          fi
+          echo "Registry reachable."
+
+      - name: Diagnose registry check failure
+        if: failure() && steps.registry_check.outcome == 'failure'
+        run: |
+          echo "❌ STEP FAILED — Registry reachability check"
+          echo "   Workflow:     main-build.yml"
+          echo "   Mode:         ${MODE}"
+          echo "   Registry:     ${REGISTRY}"
+          echo "   Image:        ${IMAGE_NAME}:${{ steps.tag.outputs.image_tag || 'unknown' }}"
+          echo "   Failed step:  Check registry reachability"
+          echo ""
+          echo "   Error output:"
+          curl -v "http://${REGISTRY}/v2/" 2>&1 || true
+          echo ""
+          echo "   Diagnosis:    Registry at ${REGISTRY} is not reachable"
+          echo "   Likely cause: Registry container not running"
+          echo "   Fix:          Run .\\scripts\\registry-up.ps1 then re-trigger this workflow"
+
+      - name: Registry login
+        if: env.MODE == 'build-and-push'
+        run: |
+          if [ -n "${{ secrets.REGISTRY_USER }}" ] && [ -n "${{ secrets.REGISTRY_PASSWORD }}" ]; then
+            echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login "${REGISTRY}" -u "${{ secrets.REGISTRY_USER }}" --password-stdin
+            echo "Registry login successful."
+          else
+            echo "No registry credentials configured; proceeding without login (local or public registry)."
+          fi
 
       - name: Build image
+        id: build
         run: |
           docker build \
             --build-arg GIT_COMMIT="${GITHUB_SHA}" \
             -t "${REGISTRY}/${IMAGE_NAME}:${{ steps.tag.outputs.image_tag }}" \
             -t "${REGISTRY}/${IMAGE_NAME}:latest" \
-            .
+            . 2>&1 | tee /tmp/build-output.txt
+
+      - name: Diagnose build failure
+        if: failure() && steps.build.outcome == 'failure'
+        run: |
+          echo "❌ STEP FAILED — docker build"
+          echo "   Workflow:     main-build.yml"
+          echo "   Mode:         ${MODE}"
+          echo "   Registry:     ${REGISTRY}"
+          echo "   Image:        ${IMAGE_NAME}:${{ steps.tag.outputs.image_tag || 'unknown' }}"
+          echo "   Failed step:  Build image"
+          echo ""
+          echo "   Error output:"
+          cat /tmp/build-output.txt || echo "(no output captured)"
+          echo ""
+          echo "   Diagnosis:    Image build failed — see error output above"
+          echo "   Likely cause: Dockerfile syntax error, missing file, or base image pull failure"
+          echo "   Fix:          Run docker build locally to reproduce, fix the error, then push"
+
+      - name: Container smoke (build-only)
+        id: smoke
+        if: env.MODE == 'build-only'
+        run: |
+          docker run -d --name cicd-smoke \
+            -p 8099:8000 \
+            "${REGISTRY}/${IMAGE_NAME}:${{ steps.tag.outputs.image_tag }}"
+          for i in $(seq 1 15); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8099/health || echo "000")
+            echo "Attempt $i: HTTP $code"
+            [ "$code" = "200" ] && break
+            sleep 2
+          done
+          curl -sf http://localhost:8099/health
+          curl -sf http://localhost:8099/version
+          docker stop cicd-smoke
+          docker rm cicd-smoke
+
+      - name: Diagnose smoke failure
+        if: failure() && steps.smoke.outcome == 'failure'
+        run: |
+          echo "❌ STEP FAILED — Container smoke (build-only)"
+          echo "   Workflow:     main-build.yml"
+          echo "   Mode:         ${MODE}"
+          echo "   Registry:     ${REGISTRY}"
+          echo "   Image:        ${IMAGE_NAME}:${{ steps.tag.outputs.image_tag || 'unknown' }}"
+          echo "   Failed step:  Container smoke (build-only)"
+          echo ""
+          echo "   Error output:"
+          docker logs cicd-smoke 2>&1 || echo "(container not found or already removed)"
+          echo ""
+          echo "   Diagnosis:    Container did not pass health check"
+          echo "   Likely cause: App crashed on start, wrong port, or missing env var"
+          echo "   Fix:          Run docker logs cicd-smoke locally to inspect startup errors"
+          docker stop cicd-smoke 2>/dev/null || true
+          docker rm cicd-smoke 2>/dev/null || true
 
       - name: Push image
+        id: push
+        if: env.MODE == 'build-and-push'
         run: |
-          docker push "${REGISTRY}/${IMAGE_NAME}:${{ steps.tag.outputs.image_tag }}"
-          docker push "${REGISTRY}/${IMAGE_NAME}:latest"
+          docker push "${REGISTRY}/${IMAGE_NAME}:${{ steps.tag.outputs.image_tag }}" 2>&1 | tee /tmp/push-output.txt
+          docker push "${REGISTRY}/${IMAGE_NAME}:latest" 2>&1 | tee -a /tmp/push-output.txt
+
+      - name: Diagnose push failure
+        if: failure() && steps.push.outcome == 'failure'
+        run: |
+          PUSH_OUTPUT=$(cat /tmp/push-output.txt 2>/dev/null || echo "No push output captured")
+          echo "❌ STEP FAILED — docker push"
+          echo "   Workflow:     main-build.yml"
+          echo "   Mode:         ${MODE}"
+          echo "   Registry:     ${REGISTRY}"
+          echo "   Image:        ${IMAGE_NAME}:${{ steps.tag.outputs.image_tag || 'unknown' }}"
+          echo "   Failed step:  Push image"
+          echo ""
+          echo "   Error output:"
+          echo "$PUSH_OUTPUT"
+          echo ""
+          if echo "$PUSH_OUTPUT" | grep -qE "401|403|unauthorized|denied"; then
+            echo "   Diagnosis:    Registry rejected credentials"
+            echo "   Likely cause: REGISTRY_USER / REGISTRY_PASSWORD secrets not set, or expired"
+            echo "   Fix:          Check GitHub Environment secrets and re-run docker login manually"
+          else
+            echo "   Diagnosis:    Push failed — registry unreachable mid-transfer"
+            echo "   Likely cause: Registry went down during push, or network timeout"
+            echo "   Fix:          Check registry health, then re-trigger the workflow"
+          fi
+
+      - name: Verify pushed digest
+        if: env.MODE == 'build-and-push'
+        run: |
+          docker manifest inspect "${REGISTRY}/${IMAGE_NAME}:${{ steps.tag.outputs.image_tag }}" > /dev/null
+          echo "Digest verified for ${REGISTRY}/${IMAGE_NAME}:${{ steps.tag.outputs.image_tag }}"
 
       - name: Record build manifest
         run: |
@@ -46,7 +198,8 @@ jobs:
           {
             "image": "${REGISTRY}/${IMAGE_NAME}",
             "tag": "${{ steps.tag.outputs.image_tag }}",
-            "commit": "${GITHUB_SHA}"
+            "commit": "${GITHUB_SHA}",
+            "mode": "${MODE}"
           }
           EOF
           cat build-output/manifest.json

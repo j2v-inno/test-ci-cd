@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       target_url:
-        description: "URL of the env to test"
+        description: "URL of the env to test (match app_port from deploy-dev)"
         required: false
         default: "http://host.docker.internal:8001"
   workflow_run:
@@ -27,9 +27,21 @@ jobs:
           python-version: "3.12"
       - run: pip install -r requirements-dev.txt
       - name: Integration tests
+        id: integration_tests
         env:
           TARGET_URL: ${{ github.event.inputs.target_url || 'http://host.docker.internal:8001' }}
         run: pytest tests/integration -m integration -v
+      - name: Diagnose integration test failure
+        if: failure() && steps.integration_tests.outcome == 'failure'
+        run: |
+          echo "❌ STEP FAILED — Integration tests"
+          echo "   Workflow:     qa-tests.yml"
+          echo "   Target URL:   ${{ github.event.inputs.target_url || 'http://host.docker.internal:8001' }}"
+          echo "   Failed step:  Integration tests"
+          echo ""
+          echo "   Diagnosis:    Integration tests failed against the target environment"
+          echo "   Likely cause: App not running at target URL, or API behavior regression"
+          echo "   Fix:          Check deploy-dev logs, verify app is healthy, then re-run QA"
 
   smoke:
     name: Smoke tests
@@ -42,9 +54,21 @@ jobs:
           python-version: "3.12"
       - run: pip install -r requirements-dev.txt
       - name: Smoke tests
+        id: smoke_tests
         env:
           TARGET_URL: ${{ github.event.inputs.target_url || 'http://host.docker.internal:8001' }}
         run: pytest tests/smoke -m smoke -v
+      - name: Diagnose smoke test failure
+        if: failure() && steps.smoke_tests.outcome == 'failure'
+        run: |
+          echo "❌ STEP FAILED — Smoke tests"
+          echo "   Workflow:     qa-tests.yml"
+          echo "   Target URL:   ${{ github.event.inputs.target_url || 'http://host.docker.internal:8001' }}"
+          echo "   Failed step:  Smoke tests"
+          echo ""
+          echo "   Diagnosis:    Smoke tests failed against the target environment"
+          echo "   Likely cause: App not running at target URL, or health endpoint regression"
+          echo "   Fix:          Check deploy-dev logs, verify app is healthy, then re-run QA"
 
   qa-gate:
     name: QA Approval Gate

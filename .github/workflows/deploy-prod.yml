@@ -5,9 +5,21 @@ name: Deploy to Production
 on:
   workflow_dispatch:
     inputs:
+      registry_url:
+        description: "Registry used during build (must match)"
+        required: false
+        default: "localhost:5000"
+      image_name:
+        description: "Image name used during build (must match)"
+        required: false
+        default: "cicd-demo"
       image_tag:
         description: "Image tag to release (must already be in registry)"
         required: true
+      app_port:
+        description: "Host port the production container binds to"
+        required: false
+        default: "8003"
       release_notes:
         description: "Short release note shown in the workflow log"
         required: false
@@ -29,9 +41,10 @@ jobs:
     needs: [release-approval]
     runs-on: ubuntu-latest
     env:
-      REGISTRY: localhost:5000
-      IMAGE_NAME: cicd-demo
+      REGISTRY: ${{ github.event.inputs.registry_url || 'localhost:5000' }}
+      IMAGE_NAME: ${{ github.event.inputs.image_name || 'cicd-demo' }}
       IMAGE_TAG: ${{ github.event.inputs.image_tag }}
+      APP_PORT: ${{ github.event.inputs.app_port || '8003' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -42,9 +55,13 @@ jobs:
         run: docker compose -f docker-compose.prod.yml down || true
 
       - name: Up prod stack
+        env:
+          IMAGE_TAG: ${{ env.IMAGE_TAG }}
+          APP_PORT: ${{ env.APP_PORT }}
         run: docker compose -f docker-compose.prod.yml up -d
 
       - name: Wait for healthy
+        id: health_check
         run: |
           for i in $(seq 1 30); do
             status=$(docker inspect --format='{{.State.Health.Status}}' cicd-demo-prod 2>/dev/null || echo "starting")
@@ -56,6 +73,24 @@ jobs:
           done
           docker logs cicd-demo-prod
           exit 1
+
+      - name: Diagnose health check failure
+        if: failure() && steps.health_check.outcome == 'failure'
+        run: |
+          echo "❌ STEP FAILED — Deploy health check"
+          echo "   Workflow:     deploy-prod.yml"
+          echo "   Mode:         build-and-push"
+          echo "   Registry:     ${REGISTRY}"
+          echo "   Image:        ${IMAGE_NAME}:${IMAGE_TAG}"
+          echo "   Failed step:  Wait for healthy"
+          echo ""
+          echo "   Error output:"
+          docker logs cicd-demo-prod 2>&1 || echo "(container not found)"
+          docker ps -a 2>&1 || true
+          echo ""
+          echo "   Diagnosis:    Container did not pass health check within 30s"
+          echo "   Likely cause: App crashed on start, wrong image tag, or port conflict"
+          echo "   Fix:          Run docker logs cicd-demo-prod locally to inspect startup errors"
 
   post-deploy:
     name: Post-deploy monitoring & smoke
@@ -69,14 +104,27 @@ jobs:
       - run: pip install -r requirements-dev.txt
 
       - name: Smoke tests
+        id: smoke_test
         env:
-          TARGET_URL: http://host.docker.internal:8003
+          TARGET_URL: http://host.docker.internal:${{ github.event.inputs.app_port || '8003' }}
         run: pytest tests/smoke -m smoke -v
+
+      - name: Diagnose smoke failure
+        if: failure() && steps.smoke_test.outcome == 'failure'
+        run: |
+          echo "❌ STEP FAILED — Smoke tests"
+          echo "   Workflow:     deploy-prod.yml"
+          echo "   Target URL:   http://host.docker.internal:${{ github.event.inputs.app_port || '8003' }}"
+          echo "   Failed step:  Smoke tests"
+          echo ""
+          echo "   Diagnosis:    Smoke tests failed against deployed production stack"
+          echo "   Likely cause: App not responding, health endpoint down, or test regression"
+          echo "   Fix:          Check deploy logs and verify the production stack is running"
 
       - name: 60-second health watch (post-deploy monitoring)
         run: |
           for i in $(seq 1 6); do
-            code=$(curl -s -o /dev/null -w "%{http_code}" http://host.docker.internal:8003/health || echo "000")
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://host.docker.internal:${{ github.event.inputs.app_port || '8003' }}/health || echo "000")
             echo "watch $i/6 -> HTTP $code"
             if [ "$code" != "200" ]; then
               echo "Prod health degraded; aborting watch."

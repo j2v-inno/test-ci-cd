@@ -7,15 +7,21 @@
 #   - Local registry up:  .\scripts\registry-up.ps1
 #
 # Usage:
-#   .\scripts\run-pipeline.ps1                 # full pipeline up to QA gate
-#   .\scripts\run-pipeline.ps1 -Stage pr       # just PR validation
-#   .\scripts\run-pipeline.ps1 -Stage staging  # promote to staging
-#   .\scripts\run-pipeline.ps1 -Stage prod     # release to prod
+#   .\scripts\run-pipeline.ps1                          # full pipeline up to QA gate
+#   .\scripts\run-pipeline.ps1 -Stage pr                # just PR validation
+#   .\scripts\run-pipeline.ps1 -Stage build -Mode build-only   # build without push
+#   .\scripts\run-pipeline.ps1 -Stage staging           # promote to staging
+#   .\scripts\run-pipeline.ps1 -Stage prod              # release to prod
+#   .\scripts\run-pipeline.ps1 -RegistryUrl ghcr.io/myorg -ImageName myapp
 [CmdletBinding()]
 param(
     [ValidateSet("all", "pr", "build", "dev", "qa", "staging", "prod")]
     [string]$Stage = "all",
-    [string]$ImageTag = "latest"
+    [string]$ImageTag = "latest",
+    [string]$RegistryUrl = "localhost:5000",
+    [string]$ImageName = "cicd-demo",
+    [ValidateSet("build-and-push", "build-only")]
+    [string]$Mode = "build-and-push"
 )
 
 $ErrorActionPreference = "Stop"
@@ -35,12 +41,21 @@ try {
     }
 
     if ($Stage -in @("all", "build")) {
-        Invoke-Act -Event "push" -WorkflowFile ".github/workflows/main-build.yml"
+        Invoke-Act -Event "workflow_dispatch" -WorkflowFile ".github/workflows/main-build.yml" `
+            -ExtraArgs @(
+                "--input", "registry_url=$RegistryUrl",
+                "--input", "image_name=$ImageName",
+                "--input", "mode=$Mode"
+            )
     }
 
     if ($Stage -in @("all", "dev")) {
         Invoke-Act -Event "workflow_dispatch" -WorkflowFile ".github/workflows/deploy-dev.yml" `
-            -ExtraArgs @("--input", "image_tag=$ImageTag")
+            -ExtraArgs @(
+                "--input", "image_tag=$ImageTag",
+                "--input", "registry_url=$RegistryUrl",
+                "--input", "image_name=$ImageName"
+            )
     }
 
     if ($Stage -in @("all", "qa")) {
@@ -49,12 +64,21 @@ try {
 
     if ($Stage -eq "staging") {
         Invoke-Act -Event "workflow_dispatch" -WorkflowFile ".github/workflows/deploy-staging.yml" `
-            -ExtraArgs @("--input", "image_tag=$ImageTag")
+            -ExtraArgs @(
+                "--input", "image_tag=$ImageTag",
+                "--input", "registry_url=$RegistryUrl",
+                "--input", "image_name=$ImageName"
+            )
     }
 
     if ($Stage -eq "prod") {
         Invoke-Act -Event "workflow_dispatch" -WorkflowFile ".github/workflows/deploy-prod.yml" `
-            -ExtraArgs @("--input", "image_tag=$ImageTag", "--input", "release_notes=local demo")
+            -ExtraArgs @(
+                "--input", "image_tag=$ImageTag",
+                "--input", "registry_url=$RegistryUrl",
+                "--input", "image_name=$ImageName",
+                "--input", "release_notes=local demo"
+            )
     }
 
     Write-Host ""
