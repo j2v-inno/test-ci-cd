@@ -166,6 +166,9 @@ Stops every container the demo brought up (registry + dev + staging + prod).
 | `docker push localhost:5000/...` connection refused | Registry container is down — `.\scripts\registry-up.ps1` |
 | Port 8001 / 8002 / 8003 / 5000 already in use | Stop the other service, or change the `ports:` mapping in the relevant compose file |
 | `pip-audit --strict` fails in PR validation | A CVE landed in a pinned dep — bump the version in `requirements.txt`. Do **not** drop `--strict` |
+| gitleaks scan fails on a false positive | Add an `[[allowlists]]` entry in `.gitleaks.toml` at the repo root. Do **not** delete the scan job |
+| gitleaks install fails with 404 | `GITLEAKS_VERSION` variable is set to a non-existent release — remove it or correct it in Settings → Variables |
+| gitleaks found a real secret in history | **Rotate the credential immediately**, then remove it from git history with `git filter-repo` or BFG Repo Cleaner |
 | Integration test `test_create_then_get_then_delete` returns 404 after POST | Gunicorn workers > 1 split in-memory state across processes. The [Dockerfile](Dockerfile) is pinned to `--workers 1` for this demo; a real service would use Redis/a DB |
 | `upload-artifact@v4` fails with `ACTIONS_RUNTIME_TOKEN` missing | Make sure `--artifact-server-path=.act-artifacts` is in [.actrc](.actrc) |
 
@@ -175,14 +178,27 @@ The workflows use a mix of **GitHub Secrets** (sensitive values you store in the
 
 ### GitHub Secrets — configure once in the GitHub UI
 
-These are the only values you must store as secrets. GitHub encrypts them and injects them at runtime; they are never visible in logs or code.
+These are stored encrypted on GitHub's side and injected at runtime. They are never visible in logs or code.
 
-| Secret | Required | Purpose |
-|---|---|---|
-| `REGISTRY_USER` | Only for private registries | Username for Docker registry login |
-| `REGISTRY_PASSWORD` | Only for private registries | Password for Docker registry login |
+| Secret | Required | Used by | Purpose |
+|---|---|---|---|
+| `REGISTRY_USER` | Only for private registries | `main-build.yml` | Username for Docker registry login |
+| `REGISTRY_PASSWORD` | Only for private registries | `main-build.yml` | Password for Docker registry login |
+| `GITLEAKS_LICENSE` | No (free CLI is used by default) | `pr-validation.yml` | Only needed if you switch to the paid `gitleaks/gitleaks-action` |
 
-If you're using a public or local registry (`localhost:5000`, GHCR with a token), these are optional — the build workflow will skip the login step automatically if they're not set.
+If you're using a public or local registry (`localhost:5000`, GHCR with a token), `REGISTRY_USER` / `REGISTRY_PASSWORD` are optional — the build workflow skips the login step automatically if they're not set.
+
+`GITLEAKS_LICENSE` is **not required** for this project — the PR validation workflow installs the free open-source gitleaks binary directly. Only add it if your organization wants to use the paid GitHub Action integration.
+
+### GitHub Variables — non-sensitive per-project config
+
+These are plaintext repository variables (not secrets). Set them under **Settings → Secrets and variables → Actions → Variables**.
+
+| Variable | Default | Used by | Purpose |
+|---|---|---|---|
+| `GITLEAKS_VERSION` | `8.21.2` | `pr-validation.yml` | Pin the gitleaks CLI version per project |
+
+Override `GITLEAKS_VERSION` when you need a specific gitleaks release — useful when a project has custom rules that rely on a particular version's behaviour.
 
 **How to add them (repository-level):**
 1. Go to your repo → **Settings** → **Secrets and variables** → **Actions**
@@ -220,8 +236,25 @@ These can be overridden at dispatch time without touching any files.
 | Value | Where it lives | Why |
 |---|---|---|
 | `REGISTRY_USER` / `REGISTRY_PASSWORD` | GitHub Secrets (UI only) | Sensitive — never commit credentials |
+| `GITLEAKS_LICENSE` | GitHub Secrets (UI only) | Sensitive — only needed for paid action |
+| `GITLEAKS_VERSION` | GitHub Variables (UI only) | Non-sensitive but per-project — no need to hardcode in YAML |
 | Registry URL, image name, ports | Workflow inputs with defaults | Non-sensitive, safe to change at runtime |
 | `GITHUB_SHA` | GitHub built-in | Auto-injected, no setup needed |
+
+### Per-project gitleaks customisation
+
+To extend or override the default gitleaks rules for a specific project, add a `.gitleaks.toml` file to the repo root. Example — allowlisting a false positive:
+
+```toml
+[extend]
+useDefault = true   # keep all built-in rules
+
+[[allowlists]]
+description = "test fixtures that look like secrets but aren't"
+paths = ["tests/fixtures/.*"]
+```
+
+See the [gitleaks configuration docs](https://github.com/gitleaks/gitleaks#configuration) for the full rule syntax.
 
 ---
 

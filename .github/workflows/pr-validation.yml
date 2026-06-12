@@ -1,6 +1,13 @@
 # Stage 5 in the diagram: PR Validation Pipeline
-# Runs on every pull request: compile, lint, static analysis, unit tests, security scan.
-# Quality gates: Code review (GitHub UI), Build, Unit tests, Security scan.
+# Runs on every pull request: compile, lint, static analysis, unit tests, security scan, secret scan.
+# Quality gates: Code review (GitHub UI), Build, Unit tests, Security scan, Secret scan (gitleaks).
+#
+# Gitleaks configuration (set in GitHub repo Settings → Secrets and variables):
+#   Repository variables  (Settings → Variables):
+#     GITLEAKS_VERSION   — pin a specific gitleaks release (default: 8.21.2)
+#   Repository secrets   (Settings → Secrets):
+#     GITLEAKS_LICENSE   — only needed if you use the paid gitleaks/gitleaks-action;
+#                          not required when running the free CLI binary (this workflow's default)
 name: PR Validation
 
 on:
@@ -68,3 +75,64 @@ jobs:
       - run: pip install pip-audit==2.7.3
       # --strict makes pip-audit exit non-zero on any finding; relax with `|| true` if your demo trips on it
       - run: pip-audit -r requirements.txt --strict
+
+  secret-scan:
+    name: Secret scanning (gitleaks)
+    runs-on: ubuntu-latest
+    env:
+      # Override GITLEAKS_VERSION per-project via Settings → Variables → GITLEAKS_VERSION
+      GITLEAKS_VERSION: ${{ vars.GITLEAKS_VERSION || '8.21.2' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history required — gitleaks scans every commit on the branch, not just HEAD
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        id: install
+        run: |
+          curl -sSfL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          sudo mv gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Diagnose install failure
+        if: failure() && steps.install.outcome == 'failure'
+        run: |
+          echo "❌ STEP FAILED — gitleaks install"
+          echo "   Workflow:     pr-validation.yml"
+          echo "   Version:      ${GITLEAKS_VERSION}"
+          echo "   Likely cause: Invalid version string or GitHub release not found"
+          echo "   Fix:          Check GITLEAKS_VERSION in Settings → Variables, or remove it to use the default"
+
+      - name: Scan for committed secrets
+        id: scan
+        run: |
+          # --redact masks matched values in output so the secret isn't echoed in CI logs
+          # --verbose prints each finding with file + line
+          # Custom rules: add a .gitleaks.toml to the repo root to extend or override defaults
+          gitleaks detect \
+            --source . \
+            --redact \
+            --verbose \
+            --log-level info \
+            --exit-code 1
+
+      - name: Diagnose scan failure
+        if: failure() && steps.scan.outcome == 'failure'
+        run: |
+          echo "❌ STEP FAILED — gitleaks secret scan"
+          echo "   Workflow:     pr-validation.yml"
+          echo "   Failed step:  Scan for committed secrets"
+          echo ""
+          echo "   Diagnosis:    gitleaks found at least one potential secret in the commit history"
+          echo "   Likely cause: A credential, token, or private key was committed (even if later removed)"
+          echo ""
+          echo "   Immediate actions:"
+          echo "   1. Rotate the exposed credential NOW — assume it is compromised"
+          echo "   2. Remove it from git history: git filter-repo or BFG Repo Cleaner"
+          echo "   3. Add the pattern to .gitleaks.toml under [[rules]] to prevent recurrence"
+          echo "   4. If it is a false positive, add an allow-list entry in .gitleaks.toml"
+          echo ""
+          echo "   Reference: https://github.com/gitleaks/gitleaks#configuration"
